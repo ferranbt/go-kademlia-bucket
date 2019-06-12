@@ -1,9 +1,5 @@
-module github.com/libp2p/go-libp2p-kbucket
+module github.com/ferranbt/go-kademlia-bucket
 
-require (
-	github.com/ipfs/go-ipfs-util v0.0.1
-	github.com/ipfs/go-log v0.0.1
-	github.com/libp2p/go-libp2p-core v0.0.1
-	github.com/libp2p/go-libp2p-peerstore v0.1.0
-	github.com/minio/sha256-simd v0.0.0-20190131020904-2d45a736cd16
-)
+go 1.12
+
+require golang.org/x/crypto v0.0.0-20190605123033-f99c8df09eb5
