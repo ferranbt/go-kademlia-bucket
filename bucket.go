@@ -3,8 +3,6 @@ package kbucket
 import (
 	"container/list"
 	"sync"
-
-	"github.com/libp2p/go-libp2p-core/peer"
 )
 
 // Bucket holds a list of peers.
@@ -19,33 +17,33 @@ func newBucket() *Bucket {
 	return b
 }
 
-func (b *Bucket) Peers() []peer.ID {
+func (b *Bucket) Peers() []string {
 	b.lk.RLock()
 	defer b.lk.RUnlock()
-	ps := make([]peer.ID, 0, b.list.Len())
+	ps := make([]string, 0, b.list.Len())
 	for e := b.list.Front(); e != nil; e = e.Next() {
-		id := e.Value.(peer.ID)
-		ps = append(ps, id)
+		entry := e.Value.(*Entry)
+		ps = append(ps, entry.id)
 	}
 	return ps
 }
 
-func (b *Bucket) Has(id peer.ID) bool {
+func (b *Bucket) Has(id string) bool {
 	b.lk.RLock()
 	defer b.lk.RUnlock()
 	for e := b.list.Front(); e != nil; e = e.Next() {
-		if e.Value.(peer.ID) == id {
+		if e.Value.(*Entry).id == id {
 			return true
 		}
 	}
 	return false
 }
 
-func (b *Bucket) Remove(id peer.ID) bool {
+func (b *Bucket) Remove(id string) bool {
 	b.lk.Lock()
 	defer b.lk.Unlock()
 	for e := b.list.Front(); e != nil; e = e.Next() {
-		if e.Value.(peer.ID) == id {
+		if e.Value.(*Entry).id == id {
 			b.list.Remove(e)
 			return true
 		}
@@ -53,28 +51,28 @@ func (b *Bucket) Remove(id peer.ID) bool {
 	return false
 }
 
-func (b *Bucket) MoveToFront(id peer.ID) {
+func (b *Bucket) MoveToFront(id string) {
 	b.lk.Lock()
 	defer b.lk.Unlock()
 	for e := b.list.Front(); e != nil; e = e.Next() {
-		if e.Value.(peer.ID) == id {
+		if e.Value.(*Entry).id == id {
 			b.list.MoveToFront(e)
 		}
 	}
 }
 
-func (b *Bucket) PushFront(p peer.ID) {
+func (b *Bucket) PushFront(p *Entry) {
 	b.lk.Lock()
 	b.list.PushFront(p)
 	b.lk.Unlock()
 }
 
-func (b *Bucket) PopBack() peer.ID {
+func (b *Bucket) PopBack() string {
 	b.lk.Lock()
 	defer b.lk.Unlock()
 	last := b.list.Back()
 	b.list.Remove(last)
-	return last.Value.(peer.ID)
+	return last.Value.(*Entry).id
 }
 
 func (b *Bucket) Len() int {
@@ -95,7 +93,7 @@ func (b *Bucket) Split(cpl int, target ID) *Bucket {
 	newbuck.list = out
 	e := b.list.Front()
 	for e != nil {
-		peerID := ConvertPeerID(e.Value.(peer.ID))
+		peerID := e.Value.(*Entry).hash
 		peerCPL := CommonPrefixLen(peerID, target)
 		if peerCPL > cpl {
 			cur := e

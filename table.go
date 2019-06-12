@@ -1,19 +1,15 @@
-// package kbucket implements a kademlia 'k-bucket' routing table.
+// Package kbucket implements a kademlia 'k-bucket' routing table.
 package kbucket
 
 import (
 	"errors"
 	"fmt"
+	"hash"
 	"sync"
 	"time"
 
-	"github.com/libp2p/go-libp2p-core/peer"
-	"github.com/libp2p/go-libp2p-core/peerstore"
-
-	logging "github.com/ipfs/go-log"
+	"golang.org/x/crypto/sha3"
 )
-
-var log = logging.Logger("table")
 
 var ErrPeerRejectedHighLatency = errors.New("peer rejected; latency too high")
 var ErrPeerRejectedNoCapacity = errors.New("peer rejected; insufficient capacity")
@@ -27,9 +23,6 @@ type RoutingTable struct {
 	// Blanket lock, refine later for better performance
 	tabLock sync.RWMutex
 
-	// latency metrics
-	metrics peerstore.Metrics
-
 	// Maximum acceptable latency for peers in this cluster
 	maxLatency time.Duration
 
@@ -38,28 +31,43 @@ type RoutingTable struct {
 	bucketsize int
 
 	// notification functions
-	PeerRemoved func(peer.ID)
-	PeerAdded   func(peer.ID)
+	PeerRemoved func(string)
+	PeerAdded   func(string)
+
+	hash hash.Hash
+}
+
+type Entry struct {
+	id   string
+	hash ID
 }
 
 // NewRoutingTable creates a new routing table with a given bucketsize, local ID, and latency tolerance.
-func NewRoutingTable(bucketsize int, localID ID, latency time.Duration, m peerstore.Metrics) *RoutingTable {
+func NewRoutingTable(bucketsize int, peer string, latency time.Duration, hash hash.Hash) *RoutingTable {
 	rt := &RoutingTable{
 		Buckets:     []*Bucket{newBucket()},
 		bucketsize:  bucketsize,
-		local:       localID,
 		maxLatency:  latency,
-		metrics:     m,
-		PeerRemoved: func(peer.ID) {},
-		PeerAdded:   func(peer.ID) {},
+		hash:        hash,
+		PeerRemoved: func(string) {},
+		PeerAdded:   func(string) {},
 	}
-
+	rt.local = rt.hashPeer(peer)
 	return rt
 }
 
+func (rt *RoutingTable) hashPeer(p string) []byte {
+	if rt.hash == nil {
+		rt.hash = sha3.New256()
+	}
+	rt.hash.Reset()
+	rt.hash.Write([]byte(p))
+	return rt.hash.Sum(nil)
+}
+
 // Update adds or moves the given peer to the front of its respective bucket
-func (rt *RoutingTable) Update(p peer.ID) (evicted peer.ID, err error) {
-	peerID := ConvertPeerID(p)
+func (rt *RoutingTable) Update(p string) (evicted string, err error) {
+	peerID := rt.hashPeer(p)
 	cpl := CommonPrefixLen(peerID, rt.local)
 
 	rt.tabLock.Lock()
@@ -78,14 +86,9 @@ func (rt *RoutingTable) Update(p peer.ID) (evicted peer.ID, err error) {
 		return "", nil
 	}
 
-	if rt.metrics.LatencyEWMA(p) > rt.maxLatency {
-		// Connection doesnt meet requirements, skip!
-		return "", ErrPeerRejectedHighLatency
-	}
-
 	// We have enough space in the bucket (whether spawned or grouped).
 	if bucket.Len() < rt.bucketsize {
-		bucket.PushFront(p)
+		bucket.PushFront(&Entry{id: p, hash: peerID})
 		rt.PeerAdded(p)
 		return "", nil
 	}
@@ -103,7 +106,7 @@ func (rt *RoutingTable) Update(p peer.ID) (evicted peer.ID, err error) {
 			// if after all the unfolding, we're unable to find room for this peer, scrap it.
 			return "", ErrPeerRejectedNoCapacity
 		}
-		bucket.PushFront(p)
+		bucket.PushFront(&Entry{id: p, hash: peerID})
 		rt.PeerAdded(p)
 		return "", nil
 	}
@@ -113,8 +116,8 @@ func (rt *RoutingTable) Update(p peer.ID) (evicted peer.ID, err error) {
 
 // Remove deletes a peer from the routing table. This is to be used
 // when we are sure a node has disconnected completely.
-func (rt *RoutingTable) Remove(p peer.ID) {
-	peerID := ConvertPeerID(p)
+func (rt *RoutingTable) Remove(p string) {
+	peerID := rt.hashPeer(p)
 	cpl := CommonPrefixLen(peerID, rt.local)
 
 	rt.tabLock.Lock()
@@ -147,8 +150,8 @@ func (rt *RoutingTable) nextBucket() {
 }
 
 // Find a specific peer by ID or return nil
-func (rt *RoutingTable) Find(id peer.ID) peer.ID {
-	srch := rt.NearestPeers(ConvertPeerID(id), 1)
+func (rt *RoutingTable) Find(id string) string {
+	srch := rt.NearestPeers(id, 1)
 	if len(srch) == 0 || srch[0] != id {
 		return ""
 	}
@@ -156,18 +159,17 @@ func (rt *RoutingTable) Find(id peer.ID) peer.ID {
 }
 
 // NearestPeer returns a single peer that is nearest to the given ID
-func (rt *RoutingTable) NearestPeer(id ID) peer.ID {
+func (rt *RoutingTable) NearestPeer(id string) string {
 	peers := rt.NearestPeers(id, 1)
 	if len(peers) > 0 {
 		return peers[0]
 	}
-
-	log.Debugf("NearestPeer: Returning nil, table size = %d", rt.Size())
 	return ""
 }
 
 // NearestPeers returns a list of the 'count' closest peers to the given ID
-func (rt *RoutingTable) NearestPeers(id ID, count int) []peer.ID {
+func (rt *RoutingTable) NearestPeers(peer string, count int) []string {
+	id := rt.hashPeer(peer)
 	cpl := CommonPrefixLen(id, rt.local)
 
 	// It's assumed that this also protects the buckets.
@@ -204,7 +206,7 @@ func (rt *RoutingTable) NearestPeers(id ID, count int) []peer.ID {
 		pds.peers = pds.peers[:count]
 	}
 
-	out := make([]peer.ID, 0, pds.Len())
+	out := make([]string, 0, pds.Len())
 	for _, p := range pds.peers {
 		out = append(out, p.p)
 	}
@@ -224,8 +226,8 @@ func (rt *RoutingTable) Size() int {
 }
 
 // ListPeers takes a RoutingTable and returns a list of all peers from all buckets in the table.
-func (rt *RoutingTable) ListPeers() []peer.ID {
-	var peers []peer.ID
+func (rt *RoutingTable) ListPeers() []string {
+	var peers []string
 	rt.tabLock.RLock()
 	for _, buck := range rt.Buckets {
 		peers = append(peers, buck.Peers()...)
@@ -244,8 +246,8 @@ func (rt *RoutingTable) Print() {
 
 		b.lk.RLock()
 		for e := b.list.Front(); e != nil; e = e.Next() {
-			p := e.Value.(peer.ID)
-			fmt.Printf("\t\t- %s %s\n", p.Pretty(), rt.metrics.LatencyEWMA(p).String())
+			p := e.Value.(string)
+			fmt.Printf("\t\t- %s\n", p)
 		}
 		b.lk.RUnlock()
 	}
